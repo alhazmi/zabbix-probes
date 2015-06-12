@@ -1,0 +1,192 @@
+#!/bin/bash
+
+# This script is used to add user-defined custom metrics to be monitored in by the zabbix agent running locally
+# It configures the zabbix agent and the corresponding zabbix server (Aggregator)
+
+# To run this script you need Python to be installed, and the "configureServer.py" script
+# and Python library for Zabbix API "zabbix_api.py" to be stored at /usr/local/lib/ directory.
+
+# Copy right (c) 2014, Yahya Al-Hazmi, Technische Universitaet Berlin
+# Modified by Mingyuan WU
+
+# this script is used to configure the Aggregator IP of the
+# zabbix agent by asking user to give the Aggregator IP.
+# And start the agent
+
+# Copy right (c) 2013, Yahya Al-Hazmi, Technische Universitaet Berlin
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License
+#
+
+
+LOGGER=`which logger`
+[ -z "$LOGGER" ] && LOGGER=echo || LOGGER="logger -ist zabbix_context"
+
+clear
+
+#read Zabbix server IP from /etc/zabbix/zabbix_agentd.conf
+CONFIG=/etc/zabbix/zabbix_agentd.conf
+if [ -f $CONFIG ]; then
+        . $CONFIG
+else
+        echo "not accessiable"
+        exit
+fi
+AGGREGATOR_IP=$Server
+
+temp=/tmp/tmp
+mfile=/tmp/mfile
+kfile=/tmp/kfile
+rfile=/tmp/rfile
+vtfile=/tmp/vtfile
+hfile=/tmp/hfile
+
+# add metrics
+echo "-------------------------------------------------------"
+echo "Enter your metrics one by one using the following pattern, otherwise, the added metrics will not work: "
+echo "<key, command, rate=X, valuetype=Y, history=Z>"
+echo "where,"
+echo "key: represents the name of the metric"
+echo "command: a UNIX/Linux command that is executed on the agent"
+echo "rate: the update interval in seconds"
+echo "valuetype: the data type of the monitoring values sent to zabbix server (float=0, string= 1, log= 2, numeric (unsigned integer)= 3 and text=4)"
+echo "history: history of the monitoring information in days "
+echo "The first two properties (key and command) and their order are mandatory, while the last three properties are optional and their order is not important"
+echo "EXAMPLE-1: users, wc -l /etc/passwd|cut -d" " -f1, rate=20, valuetype=3, history=30"
+echo "EXAMPLE-2: testItem, echo "testing a new metric", history=10, valuetype=1"
+echo "-------------------------------------------------------"
+
+# add the first metric
+echo "Enter the metric you want to add following the pattern described above:"
+read METRIC
+echo $METRIC >> "$temp"
+
+# to add more metrics
+echo "Do you want to add further metrics, yes/no?"
+read MOREMETRICS
+
+while [ "$MOREMETRICS" !=  "no" ]
+do
+        if [ "$MOREMETRICS" ==  "yes" ]; then
+                echo "Enter the metric you want to add following the pattern described above:"
+                read METRIC
+                echo $METRIC >> "$temp"
+		echo "Do you want to add further metrics, yes/no?"
+		read MOREMETRICS
+        else
+                echo "Error: you have to correctly enter either 'yes' or 'no'"
+                read MOREMETRICS
+        fi
+done
+
+#Write the METRICS into configuration file of the zabbix agent
+
+while read i
+do
+	key=`cut -f1 -d"," <<<$i`
+        if [[ "${key}" =~ " " ]] ; then
+		k=${key/ /} 
+        else
+		k=$key
+	fi
+        c=`cut -f2 -d"," <<<$i`
+	r=NO_PRO
+	vt=NO_PRO
+	h=NO_PRO
+	for j in 3 4 5; do 
+		FIELD=`cut -f$j -d"," <<<$i`
+		PROPERTY=$(echo $FIELD | cut -f1 -d"=") 
+		if [ "$PROPERTY" == "rate" ]; then
+			r=$(echo $FIELD | cut -f2 -d"=") 
+		elif [ "$PROPERTY" == "valuetype" ]; then
+			vt=$(echo $FIELD | cut -f2 -d"=") 
+		elif [ "$PROPERTY" == "history" ]; then
+ 			h=$(echo $FIELD | cut -f2 -d"=") 
+		else
+			echo "no more metric properties"
+		fi
+	done
+        if grep -q "\[" <<< $k; then
+                key=`cut -f1 -d"[" <<<$i`
+                rest=`cut -f2- -d"]" <<<$i`
+                command=`cut -f2 -d"," <<<$rest`
+                echo "UserParameter=$key[*],$command" >> $mfile
+                echo "`cut -f1 -d"]" <<< $i`]" >> $kfile
+                echo $r >> $rfile
+                echo $vt >> $vtfile
+                echo $h >> $hfile
+        else
+                echo "UserParameter=$k,$c" >> $mfile
+                echo $k >> $kfile
+                echo $r >> $rfile
+                echo $vt >> $vtfile
+                echo $h >> $hfile
+        fi
+done < $temp
+PARAMS=$(<"$mfile")
+
+#updates the zabbix agent configuration file
+START="# Start user-defined custom parameters;please note the changes will be overwriten, in case of rebooting"
+END="# End user-defined custom parameters, and begin the perzonalised user parameters"
+START_KEY="# Start user-defined"
+STOP_KEY="# End user-defined"
+USER_PARAMETER="UserParameter"
+tmp_cfg=$(mktemp)
+
+if grep -q "$STOP_KEY" "$CONFIG" ; then
+       awk  -v PRS="$PARAMS" -v AGGIP="$AGGREGATOR_IP" -v HN="$HOSTNAME" '/^'"$STOP_KEY"'/{
+               print $0
+               print PRS
+               f = 1
+       }f&&!/^'"$USER_PARAMETER"'/{next}/^'"$USER_PARAMETER"'/{f=0}/^Server/{$0="Server=" AGGIP}/^Hostname/{$0="Hostname=" HN}!f{print}' "$CONFIG" >> $tmp_cfg && mv $tmp_cfg "$CONFIG"
+else
+       awk -v AGGIP="$AGGREGATOR_IP" -v HN="$HOSTNAME" '/^Server/{$0="Server=" AGGIP}/^Hostname/{$0="Hostname=" HN}{print}' "$CONFIG" >> $tmp_cfg && mv $tmp_cfg "$CONFIG"
+       echo -e "\n$START" >> "$CONFIG"
+       echo -e "$PARAMS" >> "$CONFIG"
+       echo $END >> "$CONFIG"
+fi
+
+#We chown zabbix:www-data if the user www-data exists to be sure a
+#zabbix server could run it
+if id www-data &> /dev/null;then
+    chown -R zabbix:www-data /etc/zabbix
+else
+    chown -R zabbix:zabbix /etc/zabbix
+fi
+
+#stop and start the agents
+/etc/init.d/zabbix-agent force-reload
+
+#register the metrics to the server
+python /usr/local/lib/configureServer.py $AGGREGATOR_IP $HOSTNAME $kfile $rfile $vtfile $hfile
+
+if [ -f $hfile ]; then
+	echo 'hsfile'
+        rm $hfile
+fi
+if [ -f $vtfile ]; then
+        rm $vtfile
+fi
+if [ -f $rfile ]; then
+        rm $rfile
+fi
+if [ -f $mfile ]; then
+        rm $mfile
+fi
+if [ -f $kfile ]; then
+        rm $kfile
+fi
+if [ -f $temp ]; then
+        rm $temp
+fi
+
